@@ -2,7 +2,7 @@
 Test rule to create a pkg with DefaultInfo and OtherInfo files
 """
 
-load("@aspect_bazel_lib//lib/private:copy_to_directory.bzl", "copy_to_directory_bin_action")
+load("@bazel_lib//lib/private:copy_to_directory.bzl", "copy_to_directory_bin_action")
 load("//lib:paths.bzl", "relative_file")
 load("//lib:utils.bzl", "is_bazel_6_or_greater")
 load(":other_info.bzl", "OtherInfo")
@@ -59,6 +59,7 @@ def _pkg_impl(ctx):
         files = ctx.files.srcs + symlinks + depset(transitive = additional_files_depsets).to_list(),
         dst = dst,
         copy_to_directory_bin = ctx.executable._tool,
+        copy_to_directory_toolchain = None,
         hardlink = "auto",
         verbose = True,
     )

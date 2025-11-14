@@ -1,6 +1,6 @@
-load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
-load(":stamp_aware_rule.bzl", "my_stamp_aware_rule")
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 load("//lib:run_binary.bzl", "run_binary")
+load(":stamp_aware_rule.bzl", "my_stamp_aware_rule")
 
 my_stamp_aware_rule(
     name = "test_stamped",
@@ -32,11 +32,4 @@ run_binary(
     # Include status files as inputs when --stamp is set.
     stamp = -1,
     tool = "stamper",
-)
-
-bzl_library(
-    name = "stamp_aware_rule",
-    srcs = ["stamp_aware_rule.bzl"],
-    visibility = ["//visibility:public"],
-    deps = ["//lib:stamping"],
 )

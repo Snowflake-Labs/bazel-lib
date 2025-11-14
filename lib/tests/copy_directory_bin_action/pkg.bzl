@@ -2,7 +2,7 @@
 Test rule to create a pkg with DefaultInfo using copy_directory_bin_action
 """
 
-load("@aspect_bazel_lib//lib/private:copy_directory.bzl", "copy_directory_bin_action")
+load("@bazel_lib//lib/private:copy_directory.bzl", "copy_directory_bin_action")
 
 _attrs = {
     "src": attr.label(
@@ -25,6 +25,7 @@ def _pkg_impl(ctx):
         src = ctx.file.src,
         dst = dst,
         copy_directory_bin = ctx.executable._tool,
+        copy_directory_toolchain = None,
         hardlink = "auto",
         verbose = True,
     )

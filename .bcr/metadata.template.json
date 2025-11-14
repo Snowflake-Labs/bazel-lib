@@ -1,13 +1,26 @@
 {
-  "homepage": "https://docs.aspect.build/rules/aspect_bazel_lib",
+  "homepage": "https://registry.build/github/bazel-contrib/bazel-lib",
   "maintainers": [
     {
-      "email": "hello@aspect.dev",
-      "github": "aspect-build",
-      "name": "Aspect team"
+      "name": "Alex Eagle",
+      "email": "alex@aspect.build",
+      "github": "alexeagle",
+      "github_user_id": 47395
+    },
+    {
+      "name": "Derek Cormier",
+      "email": "derek@aspect.build",
+      "github": "kormide",
+      "github_user_id": 4948761
+    },
+    {
+      "email": "fabian@buildbuddy.io",
+      "github": "fmeum",
+      "name": "Fabian Meumertzheim",
+      "github_user_id": 4312191
     }
   ],
-  "repository": ["github:aspect-build/bazel-lib"],
+  "repository": ["github:bazel-contrib/bazel-lib"],
   "versions": [],
   "yanked_versions": {}
 }

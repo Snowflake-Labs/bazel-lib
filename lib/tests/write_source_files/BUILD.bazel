@@ -1,16 +1,20 @@
-load("//lib/tests/write_source_files:write_source_file_test.bzl", "write_source_file_test")
-load("//lib/tests:generate_outputs.bzl", "generate_outputs")
-load("//lib:write_source_files.bzl", "write_source_files")
-load("//lib/private:write_source_file.bzl", "write_source_file")
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("//lib:copy_to_directory.bzl", "copy_to_directory")
 load("//lib:directory_path.bzl", "directory_path")
 load("//lib:output_files.bzl", "output_files")
 load("//lib:testing.bzl", "assert_outputs")
+load("//lib:write_source_files.bzl", "write_source_files")
+load("//lib/private:write_source_file.bzl", "write_source_file")
+load("//lib/tests:generate_outputs.bzl", "generate_outputs")
+load("//lib/tests/write_source_files:write_source_file_test.bzl", "write_source_file_test")
 
-genrule(
+write_file(
     name = "a-desired",
-    outs = ["a-desired.js"],
-    cmd = "echo 'console.log(\"a*\");' > $@",
+    out = "a-desired.js",
+    content = [
+        "console.log(\"a*\");",
+        "",
+    ],
 )
 
 generate_outputs(
@@ -41,10 +45,13 @@ output_files(
     target = ":b_c-desired",
 )
 
-genrule(
+write_file(
     name = "e-contained",
-    outs = ["e-contained.js"],
-    cmd = "echo 'console.log(\"e*\");' > $@",
+    out = "e-contained.js",
+    content = [
+        "console.log(\"e*\");",
+        "",
+    ],
 )
 
 copy_to_directory(
@@ -60,10 +67,13 @@ copy_to_directory(
     },
 )
 
-genrule(
+write_file(
     name = "f-contained",
-    outs = ["f-contained.js"],
-    cmd = "echo 'console.log(\"f*\");' > $@",
+    out = "f-contained.js",
+    content = [
+        "console.log(\"f*\");",
+        "",
+    ],
 )
 
 copy_to_directory(
@@ -101,6 +111,22 @@ output_files(
     target = ":g_h-desired",
 )
 
+write_file(
+    name = "hidden-contained",
+    out = ".hidden",
+    content = [
+        "hidden file test",
+        "",
+    ],
+)
+
+copy_to_directory(
+    name = "hidden_dir-desired",
+    srcs = [
+        ":hidden-contained",
+    ],
+)
+
 write_source_file_test(
     name = "a_test",
     in_file = ":a-desired",
@@ -115,24 +141,16 @@ write_source_file_test(
 
 write_source_file(
     name = "e_dir_test",
+    diff_test_failure_message = "\nSample failure message for {{TARGET}}. Default message:\n{{DEFAULT_MESSAGE}}",
+    file_missing_failure_message = "\nSample failure message for a missing {{TARGET}}. Default message:\n{{DEFAULT_MESSAGE}}",
     in_file = ":e_dir-desired",
     out_file = "e_dir",
-    # The diff_test that is contained within this macro takes `out_file` which is a source directory
-    # as an input but source directories are not supported on remote execution so we must tag that
-    # rule with "no-remote-exec".
-    # ERROR: cannot compare a directory "lib/tests/write_source_files/e_dir-desired" against a file "lib/tests/write_source_files/e_dir"
-    tags = ["no-remote-exec"],
 )
 
 write_source_file(
     name = "es_dir_test",
     in_file = ":es_dir-desired",
     out_file = "es_dir",
-    # The diff_test that is contained within this macro takes `out_file` which is a source directory
-    # as an input but source directories are not supported on remote execution so we must tag that
-    # rule with "no-remote-exec".
-    # ERROR: cannot compare a directory "lib/tests/write_source_files/es_dir-desired" against a file "lib/tests/write_source_files/es_dir"
-    tags = ["no-remote-exec"],
 )
 
 write_source_file_test(
@@ -147,11 +165,18 @@ write_source_file_test(
     out_file = "g.js",
 )
 
+write_source_file(
+    name = "hidden_dir_test",
+    in_file = ":hidden_dir-desired",
+    out_file = "hidden_dir",
+)
+
 write_source_files(
     name = "macro_smoke_test",
     additional_update_targets = [
         "//lib/tests/write_source_files/subdir:macro_smoke_test",
     ],
+    diff_test_failure_message = "\nSample failure message for {{TARGET}} of {{SUGGESTED_UPDATE_TARGET}}. Default message:\n{{DEFAULT_MESSAGE}}",
     files = {
         "a2.js": ":a-desired",
         "b2.js": ":b-desired",
@@ -160,16 +185,15 @@ write_source_files(
         "f2.js": ":f-desired",
         "g2.js": ":g-desired",
     },
-    # The diff_test that is contained within this macro takes output directories `es_dir` and
-    # `es2dir` which are source directories as inputs but source directories are not supported on
-    # remote execution so we must tag that rule with "no-remote-exec".
-    tags = ["no-remote-exec"],
 )
 
-genrule(
+write_file(
     name = "dist",
-    outs = ["dist.js"],
-    cmd = "echo 'dist' > $@",
+    out = "dist.js",
+    content = [
+        "dist",
+        "",
+    ],
 )
 
 # See e2e/write_source_files
@@ -217,4 +241,20 @@ write_source_files(
     files = {
         "skylib_LICENSE": "@bazel_skylib//:LICENSE",
     },
+)
+
+# Test that we can write to a sub package
+write_source_file_test(
+    name = "a_subpkg_test",
+    check_that_out_file_exists = False,
+    in_file = ":a-desired",
+    out_file = "//lib/tests/write_source_files/subpkg:a.js",
+)
+
+# Test that we can write to a parent package
+write_source_file_test(
+    name = "a_parentpkg_test",
+    check_that_out_file_exists = False,
+    in_file = ":a-desired",
+    out_file = "//lib/tests:a.js",
 )

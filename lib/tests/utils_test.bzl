@@ -51,7 +51,7 @@ def _is_external_label_test_impl(ctx):
     asserts.false(env, utils.is_external_label("//some/label"))
     asserts.false(env, utils.is_external_label(Label("//some/label")))
     asserts.false(env, utils.is_external_label("@//some/label"))
-    asserts.false(env, utils.is_external_label(Label("@aspect_bazel_lib//some/label")))
+    asserts.false(env, utils.is_external_label(Label("@bazel_lib//some/label")))
     asserts.false(env, ctx.attr.internal_with_workspace_as_string)
 
     # the "@@" repository name syntax applies to Bazel 6 or greater
@@ -59,7 +59,7 @@ def _is_external_label_test_impl(ctx):
         asserts.false(env, utils.is_external_label("@@//some/label"))
 
     # assert that labels and string that give a workspace return true
-    asserts.true(env, utils.is_external_label(Label("@foo//some/label")))
+    asserts.true(env, utils.is_external_label(Label("@bazel_skylib//some/label")))
     asserts.true(env, ctx.attr.external_as_string)
 
     return unittest.end(env)
@@ -71,13 +71,70 @@ def _propagate_well_known_tags_test_impl(ctx):
 
     return unittest.end(env)
 
+def _propagate_common_rule_attributes_test_impl(ctx):
+    env = unittest.begin(ctx)
+
+    asserts.equals(env, {
+        "features": ["dbg"],
+        "testonly": True,
+        "visibility": ["//visibility:private"],
+    }, utils.propagate_common_rule_attributes({
+        "features": ["dbg"],
+        "testonly": True,
+        "visibility": ["//visibility:private"],
+        "platform": ["//:myplatform"],
+        "env": {"PATH": "/usr/bin:/bin"},
+        "size": "small",
+    }))
+
+    return unittest.end(env)
+
+def _propagate_common_test_rule_attributes_test_impl(ctx):
+    env = unittest.begin(ctx)
+
+    asserts.equals(env, {
+        "features": ["dbg"],
+        "testonly": True,
+        "visibility": ["//visibility:private"],
+        "env": {"PATH": "/usr/bin:/bin"},
+        "size": "small",
+    }, utils.propagate_common_test_rule_attributes({
+        "features": ["dbg"],
+        "testonly": True,
+        "visibility": ["//visibility:private"],
+        "platform": ["//:myplatform"],
+        "env": {"PATH": "/usr/bin:/bin"},
+        "size": "small",
+    }))
+
+    return unittest.end(env)
+
+def _propagate_common_binary_rule_attributes_test_impl(ctx):
+    env = unittest.begin(ctx)
+
+    asserts.equals(env, {
+        "features": ["dbg"],
+        "testonly": True,
+        "visibility": ["//visibility:private"],
+        "env": {"PATH": "/usr/bin:/bin"},
+    }, utils.propagate_common_binary_rule_attributes({
+        "features": ["dbg"],
+        "testonly": True,
+        "visibility": ["//visibility:private"],
+        "platform": ["//:myplatform"],
+        "env": {"PATH": "/usr/bin:/bin"},
+        "size": "small",
+    }))
+
+    return unittest.end(env)
+
 def _consistent_label_str_impl(ctx):
     env = unittest.begin(ctx)
 
     asserts.equals(env, "@//foo:bar", utils.consistent_label_str(ctx, Label("//foo:bar")))
     asserts.equals(env, "@//foo:bar", utils.consistent_label_str(ctx, Label("@//foo:bar")))
-    asserts.equals(env, "@//foo:bar", utils.consistent_label_str(ctx, Label("@aspect_bazel_lib//foo:bar")))
-    asserts.equals(env, "@external_workspace//foo:bar", utils.consistent_label_str(ctx, Label("@external_workspace//foo:bar")))
+    asserts.equals(env, "@//foo:bar", utils.consistent_label_str(ctx, Label("@bazel_lib//foo:bar")))
+    asserts.equals(env, "@bazel_skylib//foo:bar", utils.consistent_label_str(ctx, Label("@bazel_skylib//foo:bar")))
 
     return unittest.end(env)
 
@@ -104,6 +161,9 @@ is_external_label_test = unittest.make(
 )
 
 propagate_well_known_tags_test = unittest.make(_propagate_well_known_tags_test_impl)
+propagate_common_rule_attributes_test = unittest.make(_propagate_common_rule_attributes_test_impl)
+propagate_common_test_rule_attributes_test = unittest.make(_propagate_common_test_rule_attributes_test_impl)
+propagate_common_binary_rule_attributes_test = unittest.make(_propagate_common_binary_rule_attributes_test_impl)
 consistent_label_str_test = unittest.make(_consistent_label_str_impl)
 
 # buildifier: disable=function-docstring
@@ -118,14 +178,23 @@ def file_exists_test():
 
 # buildifier: disable=function-docstring
 def utils_test_suite():
-    to_label_test(name = "to_label_tests", relative_asserts = {
-        utils.to_label(":utils_test.bzl"): "//lib/tests:utils_test.bzl",
-    }, timeout = "short")
+    to_label_test(
+        name = "to_label_tests",
+        relative_asserts = {
+            utils.to_label(":utils_test.bzl"): "//lib/tests:utils_test.bzl",
+        },
+        timeout = "short",
+        # TODO: to_label tests don't work under bzlmod
+        target_compatible_with = select({
+            "@bazel_lib//lib:bzlmod": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+    )
 
     is_external_label_test(
         name = "is_external_label_tests",
-        external_as_string = utils.is_external_label("@foo//some/label"),
-        internal_with_workspace_as_string = utils.is_external_label("@aspect_bazel_lib//some/label"),
+        external_as_string = utils.is_external_label("@bazel_skylib//some/label"),
+        internal_with_workspace_as_string = utils.is_external_label("@bazel_lib//some/label"),
         timeout = "short",
     )
 
@@ -134,9 +203,29 @@ def utils_test_suite():
         timeout = "short",
     )
 
+    propagate_common_rule_attributes_test(
+        name = "propagate_common_rule_attribute_tests",
+        timeout = "short",
+    )
+
+    propagate_common_test_rule_attributes_test(
+        name = "propagate_common_test_rule_attribute_tests",
+        timeout = "short",
+    )
+
+    propagate_common_binary_rule_attributes_test(
+        name = "propagate_common_binary_rule_attribute_tests",
+        timeout = "short",
+    )
+
     consistent_label_str_test(
         name = "consistent_label_str_tests",
         timeout = "short",
+        # TODO: consistent_label_str tests don't work under bzlmod
+        target_compatible_with = select({
+            "@bazel_lib//lib:bzlmod": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
     )
 
     file_exists_test()

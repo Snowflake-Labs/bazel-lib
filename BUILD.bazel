@@ -1,26 +1,41 @@
-load("@aspect_bazel_lib_host//:defs.bzl", "host")
-load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
-load("@bazel_gazelle//:def.bzl", "DEFAULT_LANGUAGES", "gazelle", "gazelle_binary")
+load("@bazel_lib//:bzl_library.bzl", "bzl_library")
+load("@bazel_lib//lib:copy_to_bin.bzl", "copy_to_bin")
+load("@bazel_lib_host//:defs.bzl", "host")
+load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@buildifier_prebuilt//:rules.bzl", "buildifier")
-load("//lib:write_source_files.bzl", "write_source_files")
-load("//lib:yq.bzl", "yq")
+load("@gazelle//:def.bzl", "DEFAULT_LANGUAGES", "gazelle", "gazelle_binary")
 load("//lib:diff_test.bzl", "diff_test")
 load("//lib:testing.bzl", "assert_contains")
-load("@bazel_skylib//rules:write_file.bzl", "write_file")
-load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
+load("//lib:write_source_files.bzl", "write_source_files")
 
-# gazelle:prefix github.com/aspect-build/bazel-lib
+exports_files([".shellcheckrc"])
+
+# gazelle:prefix github.com/bazel-contrib/bazel-lib
 
 gazelle_binary(
     name = "gazelle_bin",
-    languages = DEFAULT_LANGUAGES + [
-        "@bazel_skylib_gazelle_plugin//bzl",
-    ],
+    languages = select({
+        # TODO: under bzlmod we get go linking errors when adding
+        # the skylib gazelle plugin.
+        # https://github.com/bazelbuild/rules_go/issues/1877
+        "@bazel_lib//lib:bzlmod": DEFAULT_LANGUAGES,
+        "//conditions:default": DEFAULT_LANGUAGES + [
+            "@bazel_skylib_gazelle_plugin//bzl",
+        ],
+    }),
 )
 
 gazelle(
     name = "gazelle",
     gazelle = "gazelle_bin",
+    mode = "fix",
+)
+
+gazelle(
+    name = "gazelle.check",
+    gazelle = "gazelle_bin",
+    mode = "diff",
 )
 
 gazelle(
@@ -35,23 +50,25 @@ gazelle(
 )
 
 buildifier(
+    name = "buildifier",
+    exclude_patterns = ["./.git/*"],
+    lint_mode = "fix",
+    mode = "fix",
+    tags = ["manual"],  # tag as manual so windows ci does not build it by default
+)
+
+buildifier(
     name = "buildifier.check",
-    exclude_patterns = [
-        "./.git/*",
-    ],
+    exclude_patterns = ["./.git/*"],
     lint_mode = "warn",
     mode = "diff",
     tags = ["manual"],  # tag as manual so windows ci does not build it by default
 )
 
-bzl_library(
-    name = "internal_deps",
-    srcs = ["internal_deps.bzl"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "@bazel_tools//tools/build_defs/repo:http.bzl",
-        "@bazel_tools//tools/build_defs/repo:utils.bzl",
-    ],
+alias(
+    name = "format",
+    actual = "//tools/format",
+    tags = ["manual"],  # tag as manual so windows ci does not build it by default
 )
 
 # write_source_files() to a git ignored subdirectory of the root
@@ -69,13 +86,6 @@ write_source_files(
         "test-out/dist/write_source_file_root-test/test.txt": ":write_source_file_root",
         "test-out/dist/write_source_file_root-test_b/test.txt": ":write_source_file_root",
     },
-)
-
-# Test that yq works in the root package
-yq(
-    name = "yq_root-test",
-    srcs = ["//lib/tests/yq:a.yaml"],
-    expression = ".",
 )
 
 # Test case: diff_test with a file in a directory prefixed with "external"
@@ -102,4 +112,27 @@ assert_contains(
     name = "bazel_version_test",
     actual = ".bazelversion",
     expected = str(host.bazel_version),
+    # TODO: Enable this for windows
+    target_compatible_with = [] if host.bazel_version.startswith("7") and not host.is_windows else ["@platforms//:incompatible"],
+)
+
+bzl_library(
+    name = "bzl_library",
+    srcs = ["bzl_library.bzl"],
+    deps = ["@bazel_skylib//:bzl_library"],
+)
+
+# Place the .vale.ini file in bazel-bin so the relative path it contains
+# StylesPath = tools/lint/vale
+# will work when it's run as an action.
+copy_to_bin(
+    name = ".vale_ini",
+    srcs = [".vale.ini"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "markdown_files",
+    srcs = glob(["*.md"]),
+    tags = ["markdown"],
 )

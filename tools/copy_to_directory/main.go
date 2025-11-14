@@ -12,7 +12,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/aspect-build/bazel-lib/tools/common"
+	"github.com/bazel-contrib/bazel-lib/tools/common"
 	"github.com/bmatcuk/doublestar/v4"
 	"golang.org/x/exp/maps"
 )
@@ -26,7 +26,6 @@ type fileInfo struct {
 	WorkspacePath string `json:"workspace_path"`
 	Hardlink      bool   `json:"hardlink"`
 
-	Realpath string
 	FileInfo fs.FileInfo
 }
 
@@ -41,18 +40,24 @@ type config struct {
 	IncludeSrcsPatterns         []string          `json:"include_srcs_patterns"`
 	ReplacePrefixes             map[string]string `json:"replace_prefixes"`
 	RootPaths                   []string          `json:"root_paths"`
+	PreserveMTime               bool              `json:"preserve_mtime"`
 	Verbose                     bool              `json:"verbose"`
 
 	ReplacePrefixesKeys []string
+	TargetWorkspace     *string
 }
 
-type copyMap map[string]fileInfo
-type pathSet map[string]bool
+type (
+	copyMap map[string]fileInfo
+	pathSet map[string]bool
+)
 
-var copySet = copyMap{}
-var mkdirSet = pathSet{}
+var (
+	copySet  = copyMap{}
+	mkdirSet = pathSet{}
+)
 
-func parseConfig(configPath string) (*config, error) {
+func parseConfig(configPath string, wkspName *string) (*config, error) {
 	f, err := os.Open(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open config file: %w", err)
@@ -70,6 +75,7 @@ func parseConfig(configPath string) (*config, error) {
 	}
 
 	cfg.ReplacePrefixesKeys = maps.Keys(cfg.ReplacePrefixes)
+	cfg.TargetWorkspace = wkspName
 
 	return &cfg, nil
 }
@@ -129,9 +135,6 @@ func (w *walker) copyDir(cfg *config, srcPaths pathSet, file fileInfo) error {
 	// filepath.WalkDir walks the file tree rooted at root, calling fn for each file or directory in
 	// the tree, including root. See https://pkg.go.dev/path/filepath#WalkDir for more info.
 	walkPath := file.Path
-	if file.Realpath != "" {
-		walkPath = file.Realpath
-	}
 	return filepath.WalkDir(walkPath, func(p string, dirEntry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -155,50 +158,6 @@ func (w *walker) copyDir(cfg *config, srcPaths pathSet, file fileInfo) error {
 			return err
 		}
 
-		if info.Mode()&os.ModeSymlink == os.ModeSymlink {
-			// symlink to directories are intentionally never followed by filepath.Walk to avoid infinite recursion
-			linkPath, err := common.Realpath(p)
-			if err != nil {
-				return err
-			}
-			if srcPaths[linkPath] {
-				// recursive symlink; silently ignore
-				return nil
-			}
-			stat, err := os.Stat(linkPath)
-			if err != nil {
-				return fmt.Errorf("failed to stat file %s pointed to by symlink %s: %w", linkPath, p, err)
-			}
-			if stat.IsDir() {
-				// symlink points to a directory
-				f := fileInfo{
-					Package:       file.Package,
-					Path:          linkPath,
-					RootPath:      file.RootPath,
-					ShortPath:     path.Join(file.ShortPath),
-					Workspace:     file.Workspace,
-					WorkspacePath: path.Join(file.WorkspacePath),
-					Hardlink:      file.Hardlink,
-					FileInfo:      stat,
-				}
-				return w.copyDir(cfg, srcPaths, f)
-			} else {
-				// symlink points to a regular file
-				f := fileInfo{
-					Package:       file.Package,
-					Path:          linkPath,
-					RootPath:      file.RootPath,
-					ShortPath:     path.Join(file.ShortPath, r),
-					Workspace:     file.Workspace,
-					WorkspacePath: path.Join(file.WorkspacePath, r),
-					Hardlink:      file.Hardlink,
-					FileInfo:      stat,
-				}
-				return w.copyPath(cfg, f)
-			}
-		}
-
-		// a regular file
 		f := fileInfo{
 			Package:       file.Package,
 			Path:          p,
@@ -209,11 +168,47 @@ func (w *walker) copyDir(cfg *config, srcPaths pathSet, file fileInfo) error {
 			Hardlink:      file.Hardlink,
 			FileInfo:      info,
 		}
-		return w.copyPath(cfg, f)
+
+		outputPath, err := w.calculateOutputPath(cfg, f)
+		if err != nil {
+			return fmt.Errorf("failed to calculate output path for %s: %w", file.WorkspacePath, err)
+		}
+		if outputPath == "" {
+			// this path is excluded
+			return nil
+		}
+
+		// if file is a symlink, resolve its realpath
+		if info.Mode()&os.ModeSymlink == os.ModeSymlink {
+			realpath, err := common.Realpath(p)
+			if err != nil {
+				if os.IsNotExist(err) {
+					return fmt.Errorf("failed to get realpath of dangling symlink %s: %w", p, err)
+				}
+				return fmt.Errorf("failed to get realpath of %s: %w", p, err)
+			}
+			if srcPaths[realpath] {
+				// recursive symlink; silently ignore
+				return nil
+			}
+			stat, err := os.Stat(realpath)
+			if err != nil {
+				return fmt.Errorf("failed to stat file %s pointed to by symlink %s: %w", realpath, p, err)
+			}
+			f.Path = realpath
+			f.FileInfo = stat
+
+			if stat.IsDir() {
+				// symlink points to a directory
+				return w.copyDir(cfg, srcPaths, f)
+			}
+		}
+
+		return w.copyPath(cfg, f, outputPath)
 	})
 }
 
-func (w *walker) copyPath(cfg *config, file fileInfo) error {
+func (w *walker) calculateOutputPath(cfg *config, file fileInfo) (string, error) {
 	// Apply filters and transformations in the following order:
 	//
 	// - `include_external_repositories`
@@ -230,38 +225,40 @@ func (w *walker) copyPath(cfg *config, file fileInfo) error {
 	outputRoot := path.Dir(outputPath)
 
 	// apply include_external_repositories (if the file is from an external repository)
-	if file.Workspace != "" {
+	// automatically include files from the same workspace as this target, even if
+	// that is an external workspace with respect to `__main__`
+	if file.Workspace != "" && (cfg.TargetWorkspace == nil || file.Workspace != *cfg.TargetWorkspace) {
 		match, err := anyGlobsMatch(cfg.IncludeExternalRepositories, file.Workspace)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if !match {
-			return nil // external workspace is not included
+			return "", nil // external workspace is not included
 		}
 	}
 
 	// apply include_srcs_packages
 	match, err := anyGlobsMatch(cfg.IncludeSrcsPackages, file.Package)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !match {
-		return nil // package is not included
+		return "", nil // package is not included
 	}
 
 	// apply exclude_srcs_packages
 	match, err = anyGlobsMatch(cfg.ExcludeSrcsPackages, file.Package)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if match {
-		return nil // package is excluded
+		return "", nil // package is excluded
 	}
 
 	// apply root_paths
 	rootPathMatch, _, err := longestGlobsMatch(cfg.RootPaths, outputRoot)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if rootPathMatch != "" {
 		outputPath = strings.TrimPrefix(outputPath[len(rootPathMatch):], "/")
@@ -270,33 +267,35 @@ func (w *walker) copyPath(cfg *config, file fileInfo) error {
 	// apply include_srcs_patterns
 	match, err = anyGlobsMatch(cfg.IncludeSrcsPatterns, outputPath)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !match {
-		return nil // outputPath is not included
+		return "", nil // outputPath is not included
 	}
 
 	// apply exclude_srcs_patterns
 	match, err = anyGlobsMatch(cfg.ExcludeSrcsPatterns, outputPath)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if match {
-		return nil // outputPath is excluded
+		return "", nil // outputPath is excluded
 	}
 
 	// apply replace_prefixes
 	replacePrefixMatch, replacePrefixIndex, err := longestGlobsMatch(cfg.ReplacePrefixesKeys, outputPath)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if replacePrefixMatch != "" {
 		replaceWith := cfg.ReplacePrefixes[cfg.ReplacePrefixesKeys[replacePrefixIndex]]
 		outputPath = replaceWith + outputPath[len(replacePrefixMatch):]
 	}
 
-	outputPath = path.Join(cfg.Dst, outputPath)
+	return path.Join(cfg.Dst, outputPath), nil
+}
 
+func (w *walker) copyPath(cfg *config, file fileInfo, outputPath string) error {
 	// add this file to the copy Paths
 	dup, exists := copySet[outputPath]
 	if exists {
@@ -311,7 +310,7 @@ func (w *walker) copyPath(cfg *config, file fileInfo) error {
 
 	outputDir := path.Dir(outputPath)
 	if !mkdirSet[outputDir] {
-		if err = os.MkdirAll(outputDir, os.ModePerm); err != nil {
+		if err := os.MkdirAll(outputDir, os.ModePerm); err != nil {
 			return err
 		}
 		// https://pkg.go.dev/path#Dir
@@ -323,7 +322,7 @@ func (w *walker) copyPath(cfg *config, file fileInfo) error {
 
 	if !cfg.AllowOverwrites {
 		// if we don't allow overwrites then we can start copying as soon as a copy is calculated
-		w.queue <- common.NewCopyOpts(file.Path, outputPath, file.FileInfo, file.Hardlink, cfg.Verbose)
+		w.queue <- common.NewCopyOpts(file.Path, outputPath, file.FileInfo, file.Hardlink, cfg.Verbose, cfg.PreserveMTime)
 	}
 
 	return nil
@@ -335,32 +334,52 @@ func (w *walker) copyPaths(cfg *config) error {
 		if err != nil {
 			return fmt.Errorf("failed to lstat file %s: %w", file.Path, err)
 		}
+		file.FileInfo = info
 
+		// if file is a directory, then short-circuit without calculating the output path
+		if file.FileInfo.IsDir() {
+			if err := w.copyDir(cfg, nil, file); err != nil {
+				return err
+			}
+			continue
+		}
+
+		outputPath, err := w.calculateOutputPath(cfg, file)
+		if err != nil {
+			return fmt.Errorf("failed to calculate output path for %s: %w", file.WorkspacePath, err)
+		}
+		if outputPath == "" {
+			// this path is excluded
+			continue
+		}
+
+		// if file is a symlink, resolve its realpath
 		if info.Mode()&os.ModeSymlink == os.ModeSymlink {
-			// On Windows, filepath.WalkDir doesn't like directory symlinks so we must
-			// call filepath.WalkDir on the realpath
 			realpath, err := common.Realpath(file.Path)
 			if err != nil {
-				return err
+				if os.IsNotExist(err) {
+					return fmt.Errorf("failed to get realpath of dangling symlink %s: %w", file.Path, err)
+				}
+				return fmt.Errorf("failed to get realpath of %s: %w", file.Path, err)
 			}
 			stat, err := os.Stat(realpath)
 			if err != nil {
 				return fmt.Errorf("failed to stat file %s pointed to by symlink %s: %w", realpath, file.Path, err)
 			}
-			file.Realpath = realpath
+			file.Path = realpath
 			file.FileInfo = stat
-		} else {
-			file.FileInfo = info
+
+			if file.FileInfo.IsDir() {
+				// symlink points to a directory
+				if err := w.copyDir(cfg, nil, file); err != nil {
+					return err
+				}
+				continue
+			}
 		}
 
-		if file.FileInfo.IsDir() {
-			if err := w.copyDir(cfg, nil, file); err != nil {
-				return err
-			}
-		} else {
-			if err := w.copyPath(cfg, file); err != nil {
-				return err
-			}
+		if err := w.copyPath(cfg, file, outputPath); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -369,19 +388,20 @@ func (w *walker) copyPaths(cfg *config) error {
 func main() {
 	args := os.Args[1:]
 
-	if len(args) == 1 {
-		if args[0] == "--version" || args[0] == "-v" {
-			fmt.Printf("copy_to_directory %s\n", common.Version())
-			return
-		}
-	}
-
-	if len(args) != 1 {
-		fmt.Println("Usage: copy_to_directory config_file")
+	if len(args) != 1 && len(args) != 2 {
+		fmt.Println("Usage: copy_to_directory config_file [workspace_name]")
 		os.Exit(1)
 	}
 
-	cfg, err := parseConfig(args[0])
+	configFile := args[0]
+
+	// Read workspace arg if present.
+	var wksp *string = nil
+	if len(args) >= 2 {
+		wksp = &args[1]
+	}
+
+	cfg, err := parseConfig(configFile, wksp)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -404,7 +424,7 @@ func main() {
 		// if we allow overwrites then we must wait until all copy paths are calculated before starting
 		// any copy operations
 		for outputPath, file := range copySet {
-			queue <- common.NewCopyOpts(file.Path, outputPath, file.FileInfo, file.Hardlink, cfg.Verbose)
+			queue <- common.NewCopyOpts(file.Path, outputPath, file.FileInfo, file.Hardlink, cfg.Verbose, cfg.PreserveMTime)
 		}
 	}
 

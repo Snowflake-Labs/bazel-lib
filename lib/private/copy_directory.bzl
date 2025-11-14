@@ -1,112 +1,22 @@
 """Implementation of copy_directory macro and underlying rules.
 
-This rule copies a directory to another location using Bash (on Linux/macOS) or
-cmd.exe (on Windows).
+This rule copies a directory to another location using a precompiled binary.
 """
 
-load(":copy_common.bzl", _COPY_EXECUTION_REQUIREMENTS = "COPY_EXECUTION_REQUIREMENTS", _progress_path = "progress_path")
-load(":platform_utils.bzl", _platform_utils = "platform_utils")
-
-def _copy_cmd(ctx, src, dst):
-    # Most Windows binaries built with MSVC use a certain argument quoting
-    # scheme. Bazel uses that scheme too to quote arguments. However,
-    # cmd.exe uses different semantics, so Bazel's quoting is wrong here.
-    # To fix that we write the command to a .bat file so no command line
-    # quoting or escaping is required.
-    # Put a hash of the file name into the name of the generated batch file to
-    # make it unique within the package, so that users can define multiple copy_file's.
-    bat = ctx.actions.declare_file("%s-%s-cmd.bat" % (ctx.label.name, hash(src.path)))
-
-    # Flags are documented at
-    # https://docs.microsoft.com/en-us/windows-server/administration/windows-commands/robocopy
-    # NB: robocopy return non-zero exit codes on success so we must exit 0 after calling it
-    cmd_tmpl = "@robocopy \"{src}\" \"{dst}\" /E >NUL & @exit 0"
-    mnemonic = "CopyDirectory"
-    progress_message = "Copying directory %s" % _progress_path(src)
-
-    ctx.actions.write(
-        output = bat,
-        # Do not use lib/shell.bzl's shell.quote() method, because that uses
-        # Bash quoting syntax, which is different from cmd.exe's syntax.
-        content = cmd_tmpl.format(
-            src = src.path.replace("/", "\\"),
-            dst = dst.path.replace("/", "\\"),
-        ),
-        is_executable = True,
-    )
-    ctx.actions.run(
-        inputs = [src],
-        tools = [bat],
-        outputs = [dst],
-        executable = "cmd.exe",
-        arguments = ["/C", bat.path.replace("/", "\\")],
-        mnemonic = mnemonic,
-        progress_message = progress_message,
-        use_default_shell_env = True,
-        execution_requirements = _COPY_EXECUTION_REQUIREMENTS,
-    )
-
-def _copy_bash(ctx, src, dst):
-    cmd = "rm -Rf \"$2\" && cp -fR \"$1/\" \"$2\""
-    mnemonic = "CopyDirectory"
-    progress_message = "Copying directory %s" % _progress_path(src)
-
-    ctx.actions.run_shell(
-        tools = [src],
-        outputs = [dst],
-        command = cmd,
-        arguments = [src.path, dst.path],
-        mnemonic = mnemonic,
-        progress_message = progress_message,
-        use_default_shell_env = True,
-        execution_requirements = _COPY_EXECUTION_REQUIREMENTS,
-    )
-
-# TODO(2.0): remove the legacy copy_directory_action helper
-def copy_directory_action(ctx, src, dst, is_windows = None):
-    """Legacy factory function that creates an action to copy a directory from src to dst.
-
-    For improved analysis and runtime performance, it is recommended the switch
-    to `copy_directory_bin_action` which takes a tool binary, typically the
-    `@aspect_bazel_lib//tools/copy_to_directory` `go_binary` either built from
-    source or provided by a toolchain and creates hard links instead of performing full
-    file copies.
-
-    This helper is used by copy_directory. It is exposed as a public API so it can be used within
-    other rule implementations.
-
-    Args:
-        ctx: The rule context.
-        src: The directory to make a copy of. Can be a source directory or TreeArtifact.
-        dst: The directory to copy to. Must be a TreeArtifact.
-        is_windows: Deprecated and unused
-    """
-
-    # TODO(2.0): remove deprecated & unused is_windows parameter
-    if not src.is_source and not dst.is_directory:
-        fail("src must be a source directory or TreeArtifact")
-    if dst.is_source or not dst.is_directory:
-        fail("dst must be a TreeArtifact")
-
-    # Because copy actions have "local" execution requirements, we can safely assume
-    # the execution is the same as the host platform and generate different actions for Windows
-    # and non-Windows host platforms
-    is_windows = _platform_utils.host_platform_is_windows()
-    if is_windows:
-        _copy_cmd(ctx, src, dst)
-    else:
-        _copy_bash(ctx, src, dst)
+load(":copy_common.bzl", _COPY_EXECUTION_REQUIREMENTS = "COPY_EXECUTION_REQUIREMENTS")
 
 def copy_directory_bin_action(
         ctx,
         src,
         dst,
         copy_directory_bin,
+        copy_directory_toolchain = "@bazel_lib//lib:copy_directory_toolchain_type",
         hardlink = "auto",
-        verbose = False):
+        verbose = False,
+        preserve_mtime = False):
     """Factory function that creates an action to copy a directory from src to dst using a tool binary.
 
-    The tool binary will typically be the `@aspect_bazel_lib//tools/copy_directory` `go_binary`
+    The tool binary will typically be the `@bazel_lib//tools/copy_directory` `go_binary`
     either built from source or provided by a toolchain.
 
     This helper is used by the copy_directory rule. It is exposed as a public API so it can be used
@@ -121,11 +31,17 @@ def copy_directory_bin_action(
 
         copy_directory_bin: Copy to directory tool binary.
 
+        copy_directory_toolchain: The toolchain type for Auto Exec Groups. The default is probably what you want.
+
         hardlink: Controls when to use hardlinks to files instead of making copies.
 
             See copy_directory rule documentation for more details.
 
-        verbose: If true, prints out verbose logs to stdout
+        verbose: print verbose logs to stdout
+
+        preserve_mtime: preserve the modified time from the source.
+            See the caveats above about interactions with remote execution and caching.
+
     """
     args = [
         src.path,
@@ -139,18 +55,24 @@ def copy_directory_bin_action(
     elif hardlink == "auto" and not src.is_source:
         args.append("--hardlink")
 
+    if preserve_mtime:
+        args.append("--preserve-mtime")
+
     ctx.actions.run(
         inputs = [src],
         outputs = [dst],
         executable = copy_directory_bin,
         arguments = args,
+        # TODO: Drop this after https://github.com/bazel-contrib/bazel-lib/issues/1146
+        env = {"GODEBUG": "winsymlink=0"},
         mnemonic = "CopyDirectory",
-        progress_message = "Copying directory %s" % _progress_path(src),
+        progress_message = "Copying directory %{input}",
         execution_requirements = _COPY_EXECUTION_REQUIREMENTS,
+        toolchain = copy_directory_toolchain,
     )
 
 def _copy_directory_impl(ctx):
-    copy_directory_bin = ctx.toolchains["@aspect_bazel_lib//lib:copy_directory_toolchain_type"].copy_directory_info.bin
+    copy_directory_bin = ctx.toolchains["@bazel_lib//lib:copy_directory_toolchain_type"].copy_directory_info.bin
 
     dst = ctx.actions.declare_directory(ctx.attr.out)
 
@@ -162,6 +84,7 @@ def _copy_directory_impl(ctx):
         copy_directory_bin = copy_directory_bin,
         hardlink = ctx.attr.hardlink,
         verbose = ctx.attr.verbose,
+        preserve_mtime = ctx.attr.preserve_mtime,
     )
 
     return [
@@ -184,6 +107,10 @@ _copy_directory = rule(
             default = "auto",
         ),
         "verbose": attr.bool(),
+        "preserve_mtime": attr.bool(
+            doc = """If True, the last modified time of copied files is preserved. Note the caveats on copy_directory.""",
+            default = False,
+        ),
         # use '_tool' attribute for development only; do not commit with this attribute active since it
         # propagates a dependency on rules_go which would be breaking for users
         # "_tool": attr.label(
@@ -192,7 +119,7 @@ _copy_directory = rule(
         #     default = "//tools/copy_directory",
         # ),
     },
-    toolchains = ["@aspect_bazel_lib//lib:copy_directory_toolchain_type"],
+    toolchains = ["@bazel_lib//lib:copy_directory_toolchain_type"],
 )
 
 def copy_directory(
@@ -203,7 +130,7 @@ def copy_directory(
         **kwargs):
     """Copies a directory to another location.
 
-    This rule uses a Bash command on Linux/macOS/non-Windows, and a cmd.exe command on Windows (no Bash is required).
+    This rule uses a precompiled binary to perform the copy, so no shell is required.
 
     If using this rule with source directories, it is recommended that you use the
     `--host_jvm_args=-DBAZEL_TRACK_SOURCE_DIRECTORIES=1` startup option so that changes

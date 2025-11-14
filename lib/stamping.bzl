@@ -14,7 +14,8 @@ Stamping is typically performed on a later action in the graph, like on a linkin
 This means that a changed status variable only causes that action, not re-compilation and thus does not cause cascading re-builds.
 
 Bazel provides a couple of statuses by default, such as `BUILD_EMBED_LABEL` which is the value of the `--embed_label`
-argument, as well as `BUILD_HOST` and `BUILD_USER`. You can supply more with the workspace status script, see below.
+argument, as well as `BUILD_HOST`, `BUILD_TIMESTAMP`, and `BUILD_USER`.
+You can supply more with the workspace status script, see below.
 
 Some rules accept an attribute that uses the status variables.
 They will usually say something like "subject to stamp variable replacements".
@@ -52,7 +53,7 @@ build:release --stamp --workspace_status_command=./tools/bazel_stamp_vars.sh
 First, load the helpers:
 
 ```starlark
-load("@aspect_bazel_lib//lib:stamping.bzl", "STAMP_ATTRS", "maybe_stamp")
+load("@bazel_lib//lib:stamping.bzl", "STAMP_ATTRS", "maybe_stamp")
 ```
 
 In your rule implementation, call the `maybe_stamp` function.

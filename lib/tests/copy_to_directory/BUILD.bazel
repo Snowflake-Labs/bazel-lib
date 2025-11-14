@@ -1,8 +1,9 @@
 "tests for copy_to_directory"
 
-load("//lib:diff_test.bzl", "diff_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("//lib:copy_directory.bzl", "copy_directory")
 load("//lib:copy_to_directory.bzl", "copy_to_directory")
+load("//lib:diff_test.bzl", "diff_test")
 load("//lib:directory_path.bzl", "make_directory_paths")
 
 [
@@ -66,7 +67,7 @@ diff_test(
 copy_to_directory(
     name = "case_2",
     srcs = case_srcs,
-    include_external_repositories = ["external_test_repo"],
+    include_external_repositories = ["external_test_repo?"],
     replace_prefixes = {
         # merge a, b, c, d into a new/abcd dest folder
         "a": "new/abcd",
@@ -95,7 +96,7 @@ diff_test(
 copy_to_directory(
     name = "case_3",
     srcs = case_srcs,
-    include_external_repositories = ["external_test_repo"],
+    include_external_repositories = ["external_test_repo?"],
     root_paths = [],
     verbose = True,
 )
@@ -110,7 +111,7 @@ diff_test(
 copy_to_directory(
     name = "case_4",
     srcs = case_srcs,
-    include_external_repositories = ["external_test_repo"],
+    include_external_repositories = ["external_test_repo?"],
     replace_prefixes = {
         # strip lib/tests from paths
         "lib/tests/": "",
@@ -131,7 +132,7 @@ diff_test(
 copy_to_directory(
     name = "case_5",
     srcs = case_srcs,
-    include_external_repositories = ["external_test_repo"],
+    include_external_repositories = ["external_test_repo?"],
     root_paths = [
         package_name(),
         "%s/e" % package_name(),
@@ -149,9 +150,17 @@ diff_test(
 copy_to_directory(
     name = "case_6",
     srcs = case_srcs,
-    include_external_repositories = ["external_test_repo"],
+    include_external_repositories = ["external_test_repo?"],
+    target_compatible_with = select({
+        "@bazel_lib//lib:enable_runfiles": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
 )
 
+# TODO: This test is a false positive. sh_test always includes default
+# outputs in runfiles, so even if copy_to_directory did not add its output
+# to its runfiles this test would still pass.
+# See https://github.com/bazelbuild/bazel/issues/4519.
 sh_test(
     name = "case_6_test",
     timeout = "short",
@@ -212,7 +221,7 @@ copy_to_directory(
             "@external_test_repo//:test_b": "test_b",
         },
     ),
-    include_external_repositories = ["external_test_repo"],
+    include_external_repositories = ["external_test_repo?"],
     replace_prefixes = {
         # merge a, b, c, d into a new/abcd dest folder
         "a/a": "new/abcd/a",
@@ -273,7 +282,7 @@ copy_directory(
 )
 
 # Case 11: two inputs with same subfolders
-# regression test for https://github.com/aspect-build/bazel-lib/issues/133
+# regression test for https://github.com/bazel-contrib/bazel-lib/issues/133
 copy_to_directory(
     name = "case_11",
     srcs = [
@@ -392,7 +401,7 @@ copy_to_directory(
     name = "case_18",
     srcs = case_srcs,
     exclude_srcs_packages = ["./*/**"],
-    include_external_repositories = ["e?ter*_test_repo"],
+    include_external_repositories = ["e?ter*_test_repo?"],
 )
 
 diff_test(
@@ -448,4 +457,23 @@ diff_test(
     name = "case_21_test",
     file1 = "case_21",
     file2 = ":expected_21",
+)
+
+# Case 22: empty sources creates an empty directory output
+copy_to_directory(
+    name = "case_22",
+    srcs = [],
+)
+
+copy_to_directory(
+    name = "expected_22",
+    srcs = ["dir_expected_22"],
+    exclude_srcs_patterns = ["**/filter_me_out"],
+)
+
+diff_test(
+    name = "case_22_test",
+    file1 = "case_22",
+    file2 = ":expected_22",
+    tags = ["local"],  # seems that the Bazel sandbox has trouble with empty directories
 )

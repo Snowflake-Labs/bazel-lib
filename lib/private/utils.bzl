@@ -133,13 +133,14 @@ def _file_exists(path):
     label = _to_label(path)
     file_abs = "%s/%s" % (label.package, label.name)
     file_rel = file_abs[len(native.package_name()) + 1:]
-    file_glob = native.glob([file_rel], exclude_directories = 1)
+    file_glob = native.glob([file_rel], exclude_directories = 1, allow_empty = True)
     return len(file_glob) > 0
 
 def _default_timeout(size, timeout):
     """Provide a sane default for *_test timeout attribute.
 
-    The [test-encyclopedia](https://bazel.build/reference/test-encyclopedia) says
+    The [test-encyclopedia](https://bazel.build/reference/test-encyclopedia) says:
+
     > Tests may return arbitrarily fast regardless of timeout.
     > A test is not penalized for an overgenerous timeout, although a warning may be issued:
     > you should generally set your timeout as tight as you can without incurring any flakiness.
@@ -147,7 +148,9 @@ def _default_timeout(size, timeout):
     However Bazel's default for timeout is medium, which is dumb given this guidance.
 
     It also says:
+
     > Tests which do not explicitly specify a timeout have one implied based on the test's size as follows
+
     Therefore if size is specified, we should allow timeout to take its implied default.
     If neither is set, then we can fix Bazel's wrong default here to avoid warnings under
     `--test_verbose_timeout_warnings`.
@@ -177,18 +180,18 @@ def _is_bazel_6_or_greater():
     be used in rules and BUILD files.
 
     An alternate approach to make the Bazel version available in BUILD files and rules would be to
-    use the [host_repo](https://github.com/aspect-build/bazel-lib/blob/main/docs/host_repo.md) repository rule
+    use the [host_repo](https://github.com/bazel-contrib/bazel-lib/blob/main/docs/host_repo.md) repository rule
     which contains the bazel_version in the exported `host` struct:
 
     WORKSPACE:
     ```
-    load("@aspect_bazel_lib//lib:host_repo.bzl", "host_repo")
-    host_repo(name = "aspect_bazel_lib_host")
+    load("@bazel_lib//lib:host_repo.bzl", "host_repo")
+    host_repo(name = "bazel_lib_host")
     ```
 
     BUILD.bazel:
     ```
-    load("@aspect_bazel_lib_host//:defs.bzl", "host")
+    load("@bazel_lib_host//:defs.bzl", "host")
     print(host.bazel_version)
     ```
 
@@ -202,9 +205,41 @@ def _is_bazel_6_or_greater():
     # native.bazel_version only works in repository rules.
     return "apple_binary" not in dir(native)
 
+def _is_bazel_7_or_greater():
+    """Detects if the Bazel version being used is greater than or equal to 7 (including Bazel 7 pre-releases and RCs).
+
+    Unlike the undocumented `native.bazel_version`, which only works in WORKSPACE and repository rules, this function can
+    be used in rules and BUILD files.
+
+    An alternate approach to make the Bazel version available in BUILD files and rules would be to
+    use the [host_repo](https://github.com/bazel-contrib/bazel-lib/blob/main/docs/host_repo.md) repository rule
+    which contains the bazel_version in the exported `host` struct:
+
+    WORKSPACE:
+    ```
+    load("@bazel_lib//lib:host_repo.bzl", "host_repo")
+    host_repo(name = "bazel_lib_host")
+    ```
+
+    BUILD.bazel:
+    ```
+    load("@bazel_lib_host//:defs.bzl", "host")
+    print(host.bazel_version)
+    ```
+
+    That approach, however, incurs a cost in the user's WORKSPACE.
+
+    Returns:
+        True if the Bazel version being used is greater than or equal to 7 (including pre-releases and RCs)
+    """
+
+    # Hacky way to check if the we're using at least Bazel 7. Would be nice if there was a ctx.bazel_version instead.
+    # native.bazel_version only works in repository rules.
+    return "apple_binary" not in dir(native) and "cc_host_toolchain_alias" not in dir(native)
+
 def is_bzlmod_enabled():
     """Detect the value of the --enable_bzlmod flag"""
-    return str(Label("@//:BUILD.bazel")).startswith("@@")
+    return str(Label("//:BUILD.bazel")).startswith("@@")
 
 def _maybe_http_archive(**kwargs):
     """Adapts a maybe(http_archive, ...) to look like an http_archive.
@@ -244,16 +279,111 @@ def _maybe_http_archive(**kwargs):
     """
     maybe(_http_archive, **kwargs)
 
+_COMMON_RULE_ATTRIBUTES = [
+    "compatible_with",
+    "deprecation",
+    "distribs",
+    "exec_compatible_with",
+    "exec_properties",
+    "features",
+    "restricted_to",
+    "tags",
+    "target_compatible_with",
+    "testonly",
+    "toolchains",
+    "visibility",
+]
+
+_COMMON_TEST_RULE_ATTRIBUTES = _COMMON_RULE_ATTRIBUTES + [
+    "args",
+    "env",
+    "env_inherit",
+    "size",
+    "timeout",
+    "flaky",
+    "shard_count",
+    "local",
+]
+
+_COMMON_BINARY_RULE_ATTRIBUTES = _COMMON_RULE_ATTRIBUTES + [
+    "args",
+    "env",
+    "output_licenses",
+]
+
+def _propagate_common_rule_attributes(attrs):
+    """Returns a dict of rule parameters filtered from the input dict that only contains the ones that are common to all rules
+
+    These are listed in Bazel's documentation:
+    https://bazel.build/reference/be/common-definitions#common-attributes
+
+    Args:
+        attrs: Dict of parameters to filter
+
+    Returns:
+        The dict of parameters, containing only common attributes
+    """
+
+    return {
+        k: attrs[k]
+        for k in attrs
+        if k in _COMMON_RULE_ATTRIBUTES
+    }
+
+def _propagate_common_test_rule_attributes(attrs):
+    """Returns a dict of rule parameters filtered from the input dict that only contains the ones that are common to all test rules
+
+    These are listed in Bazel's documentation:
+    https://bazel.build/reference/be/common-definitions#common-attributes
+    https://bazel.build/reference/be/common-definitions#common-attributes-tests
+
+    Args:
+        attrs: Dict of parameters to filter
+
+    Returns:
+        The dict of parameters, containing only common test attributes
+    """
+
+    return {
+        k: attrs[k]
+        for k in attrs
+        if k in _COMMON_TEST_RULE_ATTRIBUTES
+    }
+
+def _propagate_common_binary_rule_attributes(attrs):
+    """Returns a dict of rule parameters filtered from the input dict that only contains the ones that are common to all binary rules
+
+    These are listed in Bazel's documentation:
+    https://bazel.build/reference/be/common-definitions#common-attributes
+    https://bazel.build/reference/be/common-definitions#common-attributes-binary
+
+    Args:
+        attrs: Dict of parameters to filter
+
+    Returns:
+        The dict of parameters, containing only common binary attributes
+    """
+
+    return {
+        k: attrs[k]
+        for k in attrs
+        if k in _COMMON_RULE_ATTRIBUTES or k in _COMMON_BINARY_RULE_ATTRIBUTES
+    }
+
 utils = struct(
     default_timeout = _default_timeout,
     file_exists = _file_exists,
     glob_directories = _glob_directories,
     is_bazel_6_or_greater = _is_bazel_6_or_greater,
+    is_bazel_7_or_greater = _is_bazel_7_or_greater,
     is_bzlmod_enabled = is_bzlmod_enabled,
     is_external_label = _is_external_label,
     maybe_http_archive = _maybe_http_archive,
     path_to_workspace_root = _path_to_workspace_root,
     propagate_well_known_tags = _propagate_well_known_tags,
+    propagate_common_rule_attributes = _propagate_common_rule_attributes,
+    propagate_common_test_rule_attributes = _propagate_common_test_rule_attributes,
+    propagate_common_binary_rule_attributes = _propagate_common_binary_rule_attributes,
     to_label = _to_label,
     consistent_label_str = _consistent_label_str,
 )

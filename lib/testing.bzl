@@ -1,13 +1,13 @@
 "Helpers for making test assertions"
 
-load("//lib:params_file.bzl", "params_file")
 load("@bazel_skylib//lib:types.bzl", "types")
-load("@bazel_skylib//rules:diff_test.bzl", "diff_test")
 load("@bazel_skylib//rules:write_file.bzl", "write_file")
-load("//lib:utils.bzl", "default_timeout")
-load("//lib:jq.bzl", "jq")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//lib:diff_test.bzl", "diff_test")
+load("//lib:params_file.bzl", "params_file")
+load("//lib:paths.bzl", "BASH_RLOCATION_FUNCTION")
 
-def assert_contains(name, actual, expected, size = None, timeout = None, **kwargs):
+def assert_contains(name, actual, expected, size = "small", **kwargs):
     """Generates a test target which fails if the file doesn't contain the string.
 
     Depends on bash, as it creates an sh_test target.
@@ -16,37 +16,38 @@ def assert_contains(name, actual, expected, size = None, timeout = None, **kwarg
         name: target to create
         actual: Label of a file
         expected: a string which should appear in the file
-        size: the size attribute of the test target
-        timeout: the timeout attribute of the test target
+        size: standard attribute for tests
         **kwargs: additional named arguments for the resulting sh_test
     """
 
-    test_sh = "_{}_test.sh".format(name)
-    expected_file = "_{}_expected.txt".format(name)
+    test_sh = "{}_test.sh".format(name)
+    expected_file = "{}_expected.txt".format(name)
 
     write_file(
-        name = "_%s_expected" % name,
+        name = "{}_expected".format(name),
         out = expected_file,
         content = [expected],
     )
 
     write_file(
-        name = "_" + name,
+        name = "{}_gen".format(name),
         out = test_sh,
         content = [
             "#!/usr/bin/env bash",
             "set -o errexit",
-            "grep --fixed-strings -f $1 $2",
+            BASH_RLOCATION_FUNCTION,
+            "expected=$(rlocation $1)",
+            "actual=$(rlocation $2)",
+            "grep --fixed-strings -f $expected $actual",
         ],
     )
 
-    native.sh_test(
+    sh_test(
         name = name,
         srcs = [test_sh],
-        args = ["$(rootpath %s)" % expected_file, "$(rootpath %s)" % actual],
+        args = ["$(rlocationpath %s)" % expected_file, "$(rlocationpath %s)" % actual],
         size = size,
-        timeout = default_timeout(size, timeout),
-        data = [actual, expected_file],
+        data = [actual, expected_file, "@bazel_tools//tools/bash/runfiles"],
         **kwargs
     )
 
@@ -61,69 +62,25 @@ def assert_outputs(name, actual, expected, **kwargs):
     """
 
     if not types.is_list(expected):
-        fail("expected should be a list of strings")
+        fail("expected should be a list of strings, not " + type(expected))
 
     params_file(
-        name = "_actual_" + name,
+        name = name + "_actual",
         data = [actual],
         args = ["$(rootpaths {})".format(actual)],
-        out = "_{}_outputs.txt".format(name),
+        out = "{}_outputs.txt".format(name),
     )
 
     write_file(
-        name = "_expected_ " + name,
+        name = name + "_expected",
         content = expected,
-        out = "_expected_{}.txt".format(name),
+        out = "{}_expected.txt".format(name),
     )
 
     diff_test(
         name = name,
-        file1 = "_expected_ " + name,
-        file2 = "_actual_" + name,
-        **kwargs
-    )
-
-def assert_json_matches(name, file1, file2, filter1 = ".", filter2 = ".", **kwargs):
-    """Assert that the given json files have the same semantic content.
-
-    Uses jq to filter each file. The default value of `"."` as the filter
-    means to compare the whole file.
-
-    See the [jq rule](./jq.md#jq) for more about the filter expressions as well as
-    setup notes for the `jq` toolchain.
-
-    Args:
-        name: name of resulting diff_test target
-        file1: a json file
-        file2: another json file
-        filter1: a jq filter to apply to file1
-        filter2: a jq filter to apply to file2
-        **kwargs: additional named arguments for the resulting diff_test
-    """
-    name1 = "_{}_jq1".format(name)
-    name2 = "_{}_jq2".format(name)
-    jq(
-        name = name1,
-        srcs = [file1],
-        filter = filter1,
-    )
-
-    jq(
-        name = name2,
-        srcs = [file2],
-        filter = filter2,
-    )
-
-    diff_test(
-        name = name,
-        file1 = name1,
-        file2 = name2,
-        failure_message = "'{}' from {} doesn't match '{}' from {}".format(
-            filter1,
-            file1,
-            filter2,
-            file2,
-        ),
+        file1 = name + "_expected",
+        file2 = name + "_actual",
         **kwargs
     )
 
@@ -157,8 +114,8 @@ def assert_archive_contains(name, archive, expected, type = None, **kwargs):
     # -v: only print lines which don't match
     grep = "grep -F -x -v -f $actual"
 
-    script_name = "_gen_assert_" + name
-    expected_name = "_expected_" + name
+    script_name = name + "_gen_assert"
+    expected_name = name + "_expected"
 
     if types.is_list(expected):
         write_file(
@@ -185,11 +142,66 @@ def assert_archive_contains(name, archive, expected, type = None, **kwargs):
         ],
     )
 
-    native.sh_test(
+    sh_test(
         name = name,
         srcs = [script_name],
         args = ["$(rootpath %s)" % archive, "$(rootpath %s)" % expected_name],
         data = [archive, expected_name],
+        timeout = "short",
+        **kwargs
+    )
+
+def assert_directory_contains(name, directory, expected, **kwargs):
+    """Assert that a directory contains at least the given file entries.
+
+    Args:
+        name: name of the resulting sh_test target
+        directory: Label of the directory artifact
+        expected: a (partial) file listing, either as a Label of a file containing it, or a list of strings
+        **kwargs: additional named arguments for the resulting sh_test
+    """
+
+    # -f $actual: use this file to contain one pattern per line
+    # -F: treat each pattern as a plain string, not a regex
+    # -x: match whole lines only
+    # -v: only print lines which don't match
+    grep = "grep -F -x -v -f $actual"
+
+    script_name = name + "_gen_assert"
+    expected_name = name + "_expected"
+
+    if types.is_list(expected):
+        write_file(
+            name = expected_name,
+            out = expected_name + ".mf",
+            content = expected,
+        )
+    else:
+        expected_name = expected
+
+    write_file(
+        name = script_name,
+        out = "assert_{}.sh".format(name),
+        content = [
+            "#!/usr/bin/env bash",
+            "actual=$(mktemp)",
+            "pushd $1 > /dev/null",
+            "find . -type l,f | cut -b 3- > $actual",
+            "popd > /dev/null",
+            "# Grep exits 1 if no matches, which is success for this test.",
+            "if {} $2; then".format(grep),
+            "  echo",
+            "  echo 'ERROR: above line(s) appeared in {} but are not present in the directory' $1".format(expected_name),
+            "  exit 1",
+            "fi",
+        ],
+    )
+
+    sh_test(
+        name = name,
+        srcs = [script_name],
+        args = ["$(rootpath %s)" % directory, "$(rootpath %s)" % expected_name],
+        data = [directory, expected_name],
         timeout = "short",
         **kwargs
     )

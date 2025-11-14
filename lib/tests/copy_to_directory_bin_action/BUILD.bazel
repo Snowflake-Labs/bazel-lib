@@ -1,7 +1,6 @@
-load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
-load("//lib:diff_test.bzl", "diff_test")
 load("//lib:copy_directory.bzl", "copy_directory")
 load("//lib:copy_to_bin.bzl", "copy_to_bin")
+load("//lib:diff_test.bzl", "diff_test")
 load(":lib.bzl", "lib")
 load(":pkg.bzl", "pkg")
 
@@ -14,6 +13,8 @@ copy_directory(
     name = "tree_artifact",
     src = "ds",
     out = "dsc",
+    # RBE not happy with the symlinks in this test case
+    tags = ["no-remote"],
 )
 
 lib(
@@ -25,7 +26,7 @@ lib(
     others = [
         "1",
         # also pass in a copy_to_bin copy of "1" to spice things up;
-        # this case is handled in the fix in https://github.com/aspect-build/bazel-lib/pull/205
+        # this case is handled in the fix in https://github.com/bazel-contrib/bazel-lib/pull/205
         "copy_1",
         "2",
         "d",
@@ -43,8 +44,10 @@ pkg(
         ":tree_artifact",
     ],
     out = "pkg",
+    # RBE not happy with the symlinks in this test case
+    tags = ["no-remote"],
     use_declare_symlink = select({
-        "//lib/tests:experimental_allow_unresolved_symlinks": True,
+        "//lib/tests:allow_unresolved_symlinks": True,
         "//conditions:default": False,
     }),
 )
@@ -53,12 +56,6 @@ diff_test(
     name = "test",
     file1 = ":pkg",
     file2 = ":expected_pkg",
-    # Source directories are not support on remote execution.
-    tags = ["no-remote-exec"],
-)
-
-bzl_library(
-    name = "other_info",
-    srcs = ["other_info.bzl"],
-    visibility = ["//visibility:public"],
+    # RBE not happy with the symlinks in this test case
+    tags = ["no-remote"],
 )

@@ -15,9 +15,11 @@
 """Implementation of copy_to_bin macro and underlying rules."""
 
 load("@bazel_skylib//lib:paths.bzl", "paths")
-load(":copy_file.bzl", "copy_file_action")
+load(":copy_file.bzl", "COPY_FILE_TOOLCHAINS", "copy_file_action")
 
-def copy_file_to_bin_action(ctx, file, is_windows = None):
+COPY_FILE_TO_BIN_TOOLCHAINS = COPY_FILE_TOOLCHAINS
+
+def copy_file_to_bin_action(ctx, file):
     """Factory function that creates an action to copy a file to the output tree.
 
     File are copied to the same workspace-relative path. The resulting files is
@@ -26,16 +28,35 @@ def copy_file_to_bin_action(ctx, file, is_windows = None):
     If the file passed in is already in the output tree is then it is returned
     without a copy action.
 
+    To use `copy_file_to_bin_action` in your own rules, you need to include the toolchains it uses
+    in your rule definition. For example:
+
+    ```starlark
+    load("@bazel_lib//lib:copy_to_bin.bzl", "COPY_FILE_TO_BIN_TOOLCHAINS")
+
+    my_rule = rule(
+        ...,
+        toolchains = COPY_FILE_TO_BIN_TOOLCHAINS,
+    )
+    ```
+
+    Additionally, you must ensure that the coreutils toolchain is has been registered in your
+    WORKSPACE if you are not using bzlmod:
+
+    ```starlark
+    load("@bazel_lib//lib:repositories.bzl", "register_coreutils_toolchains")
+
+    register_coreutils_toolchains()
+    ```
+
     Args:
         ctx: The rule context.
         file: The file to copy.
-        is_windows: Deprecated and unused
 
     Returns:
         A File in the output tree.
     """
 
-    # TODO(2.0): remove deprecated & unused is_windows parameter
     if not file.is_source:
         return file
     if ctx.label.workspace_name != file.owner.workspace_name:
@@ -60,7 +81,7 @@ and/or correct the `glob` patterns that are including these files in the sources
 """.format(bin = first))
 
     dst = ctx.actions.declare_file(file.basename, sibling = file)
-    copy_file_action(ctx, file, dst, is_windows = is_windows)
+    copy_file_action(ctx, file, dst)
     return dst
 
 def _file_in_external_repo_error_msg(file):
@@ -81,7 +102,7 @@ target to {file_package} using:
 
     buildozer 'new copy_to_bin {target_name}' {file_package}:__pkg__
     buildozer 'add srcs {file_basename}' {file_package}:{target_name}
-    buildozer 'new_load @aspect_bazel_lib//lib:copy_to_bin.bzl copy_to_bin' {file_package}:__pkg__
+    buildozer 'new_load @bazel_lib//lib:copy_to_bin.bzl copy_to_bin' {file_package}:__pkg__
     buildozer 'add visibility {package}:__subpackages__' {file_package}:{target_name}
 
     """.format(
@@ -91,7 +112,7 @@ target to {file_package} using:
         package = "%s//%s" % (curr_package_label.workspace_name, curr_package_label.package),
     )
 
-def copy_files_to_bin_actions(ctx, files, is_windows = None):
+def copy_files_to_bin_actions(ctx, files):
     """Factory function that creates actions to copy files to the output tree.
 
     Files are copied to the same workspace-relative path. The resulting list of
@@ -103,14 +124,12 @@ def copy_files_to_bin_actions(ctx, files, is_windows = None):
     Args:
         ctx: The rule context.
         files: List of File objects.
-        is_windows: Deprecated and unused
 
     Returns:
         List of File objects in the output tree.
     """
 
-    # TODO(2.0): remove deprecated & unused is_windows parameter
-    return [copy_file_to_bin_action(ctx, file, is_windows = is_windows) for file in files]
+    return [copy_file_to_bin_action(ctx, file) for file in files]
 
 def _copy_to_bin_impl(ctx):
     files = copy_files_to_bin_actions(ctx, ctx.files.srcs)
@@ -125,6 +144,7 @@ _copy_to_bin = rule(
     attrs = {
         "srcs": attr.label_list(mandatory = True, allow_files = True),
     },
+    toolchains = COPY_FILE_TO_BIN_TOOLCHAINS,
 )
 
 def copy_to_bin(name, srcs, **kwargs):

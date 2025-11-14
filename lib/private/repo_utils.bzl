@@ -8,6 +8,10 @@ def _is_linux(rctx):
     """Returns true if the host operating system is Linux"""
     return rctx.os.name.lower().startswith("linux")
 
+def _is_freebsd(rctx):
+    """Returns true if the host operating system is FreeBSD"""
+    return rctx.os.name.lower().startswith("freebsd")
+
 def _is_windows(rctx):
     """Returns true if the host operating system is Windows"""
     return rctx.os.name.lower().find("windows") != -1
@@ -19,12 +23,14 @@ def _os(rctx):
         rctx: rctx
 
     Returns:
-        The string "windows", "linux" or "darwin" that describes the host os
+        The string "windows", "linux", "freebsd" or "darwin" that describes the host os
     """
     if _is_darwin(rctx):
         return "darwin"
     if _is_linux(rctx):
         return "linux"
+    if _is_freebsd(rctx):
+        return "freebsd"
     if _is_windows(rctx):
         return "windows"
     fail("unrecognized os")
@@ -40,9 +46,17 @@ def _get_env_var(rctx, name, default):
     Returns:
         The environment variable value or the default if it is not set
     """
+
+    # On Windows, the HOME environment variable is named differently.
+    # See https://en.wikipedia.org/wiki/Home_directory#Default_home_directory_per_operating_system
+    if name == "HOME" and _is_windows(rctx):
+        name = "USERPROFILE"
     if name in rctx.os.environ:
         return rctx.os.environ[name]
     return default
+
+def _get_home_directory(rctx):
+    return _get_env_var(rctx, "HOME", None)
 
 def _platform(rctx):
     """Returns a normalized name of the host os and CPU architecture.
@@ -98,6 +112,7 @@ repo_utils = struct(
     is_linux = _is_linux,
     is_windows = _is_windows,
     get_env_var = _get_env_var,
+    get_home_directory = _get_home_directory,
     os = _os,
     platform = _platform,
 )

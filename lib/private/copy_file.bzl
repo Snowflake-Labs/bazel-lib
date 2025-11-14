@@ -12,79 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# LOCAL MODIFICATIONS
-# this has a PR patched in on top of the original
-# https://github.com/bazelbuild/bazel-skylib/blob/7b859037a673db6f606661323e74c5d4751595e6/rules/private/copy_file_private.bzl
-# https://github.com/bazelbuild/bazel-skylib/pull/324
-
 """Implementation of copy_file macro and underlying rules.
 
-These rules copy a file to another location using Bash (on Linux/macOS) or
-cmd.exe (on Windows). `_copy_xfile` marks the resulting file executable,
-`_copy_file` does not.
+These rules copy a file to another location using hermetic uutils/coreutils `cp`.
+`_copy_xfile` marks the resulting file executable, `_copy_file` does not.
 """
 
-load(":copy_common.bzl", _COPY_EXECUTION_REQUIREMENTS = "COPY_EXECUTION_REQUIREMENTS", _progress_path = "progress_path")
+load(":copy_common.bzl", _COPY_EXECUTION_REQUIREMENTS = "COPY_EXECUTION_REQUIREMENTS")
 load(":directory_path.bzl", "DirectoryPathInfo")
-load(":platform_utils.bzl", _platform_utils = "platform_utils")
 
-def _copy_cmd(ctx, src, src_path, dst):
-    # Most Windows binaries built with MSVC use a certain argument quoting
-    # scheme. Bazel uses that scheme too to quote arguments. However,
-    # cmd.exe uses different semantics, so Bazel's quoting is wrong here.
-    # To fix that we write the command to a .bat file so no command line
-    # quoting or escaping is required.
-    # Put a hash of the file name into the name of the generated batch file to
-    # make it unique within the package, so that users can define multiple copy_file's.
-    # The label of the target is intentionally not included so that two different targets
-    # can copy the same file to the output tree.
-    bat = ctx.actions.declare_file("%s-cmd.bat" % hash(src_path + dst.short_path))
+_COREUTILS_TOOLCHAIN = "@bazel_lib//lib:coreutils_toolchain_type"
 
-    # Flags are documented at
-    # https://docs.microsoft.com/en-us/windows-server/administration/windows-commands/copy
-    cmd_tmpl = "@copy /Y \"{src}\" \"{dst}\" >NUL"
-    mnemonic = "CopyFile"
-    progress_message = "Copying file %s" % _progress_path(src)
+# Declare toolchains used by copy file actions so that downstream rulesets can pass it into
+# the `toolchains` attribute of their rule.
+COPY_FILE_TOOLCHAINS = [
+    _COREUTILS_TOOLCHAIN,
+]
 
-    ctx.actions.write(
-        output = bat,
-        # Do not use lib/shell.bzl's shell.quote() method, because that uses
-        # Bash quoting syntax, which is different from cmd.exe's syntax.
-        content = cmd_tmpl.format(
-            src = src_path.replace("/", "\\"),
-            dst = dst.path.replace("/", "\\"),
-        ),
-        is_executable = True,
-    )
-    ctx.actions.run(
-        inputs = [src],
-        tools = [bat],
-        outputs = [dst],
-        executable = "cmd.exe",
-        arguments = ["/C", bat.path.replace("/", "\\")],
-        mnemonic = mnemonic,
-        progress_message = progress_message,
-        use_default_shell_env = True,
-        execution_requirements = _COPY_EXECUTION_REQUIREMENTS,
-    )
-
-def _copy_bash(ctx, src, src_path, dst):
-    cmd_tmpl = "cp -f \"$1\" \"$2\""
-    mnemonic = "CopyFile"
-    progress_message = "Copying file %s" % _progress_path(src)
-
-    ctx.actions.run_shell(
-        tools = [src],
-        outputs = [dst],
-        command = cmd_tmpl,
-        arguments = [src_path, dst.path],
-        mnemonic = mnemonic,
-        progress_message = progress_message,
-        use_default_shell_env = True,
-        execution_requirements = _COPY_EXECUTION_REQUIREMENTS,
-    )
-
-def copy_file_action(ctx, src, dst, dir_path = None, is_windows = None):
+def copy_file_action(ctx, src, dst, dir_path = None):
     """Factory function that creates an action to copy a file from src to dst.
 
     If src is a TreeArtifact, dir_path must be specified as the path within
@@ -93,15 +38,34 @@ def copy_file_action(ctx, src, dst, dir_path = None, is_windows = None):
     This helper is used by copy_file. It is exposed as a public API so it can be used within
     other rule implementations.
 
+    To use `copy_file_action` in your own rules, you need to include the toolchains it uses
+    in your rule definition. For example:
+
+    ```starlark
+    load("@bazel_lib//lib:copy_file.bzl", "COPY_FILE_TOOLCHAINS")
+
+    my_rule = rule(
+        ...,
+        toolchains = COPY_FILE_TOOLCHAINS,
+    )
+    ```
+
+    Additionally, you must ensure that the coreutils toolchain is has been registered in your
+    WORKSPACE if you are not using bzlmod:
+
+    ```starlark
+    load("@bazel_lib//lib:repositories.bzl", "register_coreutils_toolchains")
+
+    register_coreutils_toolchains()
+    ```
+
     Args:
         ctx: The rule context.
         src: The source file to copy or TreeArtifact to copy a single file out of.
         dst: The destination file.
         dir_path: If src is a TreeArtifact, the path within the TreeArtifact to the file to copy.
-        is_windows: Deprecated and unused
     """
 
-    # TODO(2.0): remove deprecated & unused is_windows parameter
     if dst.is_directory:
         fail("dst must not be a TreeArtifact")
     if src.is_directory:
@@ -111,14 +75,18 @@ def copy_file_action(ctx, src, dst, dir_path = None, is_windows = None):
     else:
         src_path = src.path
 
-    # Because copy actions have "local" execution requirements, we can safely assume
-    # the execution is the same as the host platform and generate different actions for Windows
-    # and non-Windows host platforms
-    is_windows = _platform_utils.host_platform_is_windows()
-    if is_windows:
-        _copy_cmd(ctx, src, src_path, dst)
-    else:
-        _copy_bash(ctx, src, src_path, dst)
+    coreutils = ctx.toolchains[_COREUTILS_TOOLCHAIN].coreutils_info
+
+    ctx.actions.run(
+        executable = coreutils.bin,
+        arguments = ["cp", src_path, dst.path],
+        inputs = [src],
+        outputs = [dst],
+        mnemonic = "CopyFile",
+        progress_message = "Copying file %{input}",
+        execution_requirements = _COPY_EXECUTION_REQUIREMENTS,
+        toolchain = "@bazel_lib//lib:coreutils_toolchain_type",
+    )
 
 def _copy_file_impl(ctx):
     if ctx.attr.allow_symlink:
@@ -163,6 +131,7 @@ _copy_file = rule(
     implementation = _copy_file_impl,
     provides = [DefaultInfo],
     attrs = _ATTRS,
+    toolchains = COPY_FILE_TOOLCHAINS,
 )
 
 _copy_xfile = rule(
@@ -170,6 +139,7 @@ _copy_xfile = rule(
     executable = True,
     provides = [DefaultInfo],
     attrs = _ATTRS,
+    toolchains = COPY_FILE_TOOLCHAINS,
 )
 
 def copy_file(name, src, out, is_executable = False, allow_symlink = False, **kwargs):
@@ -177,7 +147,7 @@ def copy_file(name, src, out, is_executable = False, allow_symlink = False, **kw
 
     `native.genrule()` is sometimes used to copy files (often wishing to rename them). The 'copy_file' rule does this with a simpler interface than genrule.
 
-    This rule uses a Bash command on Linux/macOS/non-Windows, and a cmd.exe command on Windows (no Bash is required).
+    This rule uses a hermetic uutils/coreutils `cp` binary, no shell is required.
 
     If using this rule with source directories, it is recommended that you use the
     `--host_jvm_args=-DBAZEL_TRACK_SOURCE_DIRECTORIES=1` startup option so that changes
@@ -203,9 +173,7 @@ def copy_file(name, src, out, is_executable = False, allow_symlink = False, **kw
       **kwargs: further keyword arguments, e.g. `visibility`
     """
 
-    copy_file_impl = _copy_file
-    if is_executable:
-        copy_file_impl = _copy_xfile
+    copy_file_impl = _copy_xfile if is_executable else _copy_file
 
     copy_file_impl(
         name = name,

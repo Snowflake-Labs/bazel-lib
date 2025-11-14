@@ -1,3 +1,0 @@
-load(":write_aspect_bazelrc_presets.bzl", "write_aspect_bazelrc_presets")
-
-write_aspect_bazelrc_presets(name = "update_aspect_bazelrc_presets")

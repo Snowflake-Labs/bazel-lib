@@ -8,14 +8,17 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/aspect-build/bazel-lib/tools/common"
+	"github.com/bazel-contrib/bazel-lib/tools/common"
 )
 
 type pathSet map[string]bool
 
-var srcPaths = pathSet{}
-var hardlink = false
-var verbose = false
+var (
+	srcPaths      = pathSet{}
+	hardlink      = false
+	verbose       = false
+	preserveMTime = false
+)
 
 type walker struct {
 	queue chan<- common.CopyOpts
@@ -50,7 +53,10 @@ func (w *walker) copyDir(src string, dst string) error {
 			// symlink to directories are intentionally never followed by filepath.Walk to avoid infinite recursion
 			linkPath, err := common.Realpath(p)
 			if err != nil {
-				return err
+				if os.IsNotExist(err) {
+					return fmt.Errorf("failed to get realpath of dangling symlink %s: %w", p, err)
+				}
+				return fmt.Errorf("failed to get realpath of %s: %w", p, err)
 			}
 			if srcPaths[linkPath] {
 				// recursive symlink; silently ignore
@@ -65,13 +71,13 @@ func (w *walker) copyDir(src string, dst string) error {
 				return w.copyDir(linkPath, d)
 			} else {
 				// symlink points to a regular file
-				w.queue <- common.NewCopyOpts(linkPath, d, stat, hardlink, verbose)
+				w.queue <- common.NewCopyOpts(linkPath, d, stat, hardlink, verbose, preserveMTime)
 				return nil
 			}
 		}
 
 		// a regular file
-		w.queue <- common.NewCopyOpts(p, d, info, hardlink, verbose)
+		w.queue <- common.NewCopyOpts(p, d, info, hardlink, verbose, preserveMTime)
 		return nil
 	})
 }
@@ -79,15 +85,8 @@ func (w *walker) copyDir(src string, dst string) error {
 func main() {
 	args := os.Args[1:]
 
-	if len(args) == 1 {
-		if args[0] == "--version" || args[0] == "-v" {
-			fmt.Printf("copy_directory %s\n", common.Version())
-			return
-		}
-	}
-
 	if len(args) < 2 {
-		fmt.Println("Usage: copy_directory src dst [--hardlink] [--verbose]")
+		fmt.Println("Usage: copy_directory src dst [--hardlink] [--verbose] [--preserve-mtime]")
 		os.Exit(1)
 	}
 
@@ -100,6 +99,8 @@ func main() {
 				hardlink = true
 			} else if a == "--verbose" {
 				verbose = true
+			} else if a == "--preserve-mtime" {
+				preserveMTime = true
 			}
 		}
 	}

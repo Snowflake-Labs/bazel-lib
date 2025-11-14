@@ -21,8 +21,12 @@ The rule uses a Bash command (diff) on Linux/macOS/non-Windows, and a cmd.exe
 command (fc.exe) on Windows (no Bash is required).
 """
 
+load("@bazel_skylib//lib:shell.bzl", "shell")
+load("@bazel_skylib//lib:types.bzl", "types")
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
+load("//lib:paths.bzl", "to_rlocation_path")
+load("//lib:windows_utils.bzl", "BATCH_RLOCATION_FUNCTION")
 load(":directory_path.bzl", "DirectoryPathInfo")
-load("//lib:utils.bzl", "default_timeout")
 
 def _runfiles_path(f):
     if f.root.path:
@@ -33,18 +37,22 @@ def _runfiles_path(f):
 def _diff_test_impl(ctx):
     is_windows = ctx.target_platform_has_constraint(ctx.attr._windows_constraint[platform_common.ConstraintValueInfo])
 
+    file1_sub_path = ""
     if DirectoryPathInfo in ctx.attr.file1:
         file1 = ctx.attr.file1[DirectoryPathInfo].directory
         file1_path = "/".join([_runfiles_path(file1), ctx.attr.file1[DirectoryPathInfo].path])
+        file1_sub_path = ctx.attr.file1[DirectoryPathInfo].path
     else:
         if len(ctx.files.file1) != 1:
             fail("file1 must be a single file or a target that provides a DirectoryPathInfo")
         file1 = ctx.files.file1[0]
         file1_path = _runfiles_path(file1)
 
+    file2_sub_path = ""
     if DirectoryPathInfo in ctx.attr.file2:
         file2 = ctx.attr.file2[DirectoryPathInfo].directory
         file2_path = "/".join([_runfiles_path(file2), ctx.attr.file2[DirectoryPathInfo].path])
+        file2_sub_path = ctx.attr.file2[DirectoryPathInfo].path
     else:
         if len(ctx.files.file2) != 1:
             fail("file2 must be a single file or a target that provides a DirectoryPathInfo")
@@ -58,19 +66,31 @@ def _diff_test_impl(ctx):
     if is_windows:
         test_suffix = "-test.bat"
         template = ctx.file._diff_test_tmpl_bat
+        file1_path = to_rlocation_path(ctx, file1)
+        file2_path = to_rlocation_path(ctx, file2)
+        fail_msg = ["@echo" + (" " + line if line.strip() != "" else ".") for line in ctx.attr.failure_message[:-1].split("\n")]
     else:
         test_suffix = "-test.sh"
         template = ctx.file._diff_test_tmpl_sh
+        fail_msg = ctx.attr.failure_message.split("\n")
 
     test_bin = ctx.actions.declare_file(ctx.label.name + test_suffix)
     ctx.actions.expand_template(
         template = template,
         output = test_bin,
         substitutions = {
+            "{BATCH_RLOCATION_FUNCTION}": BATCH_RLOCATION_FUNCTION,
             "{name}": ctx.attr.name,
-            "{fail_msg}": ctx.attr.failure_message,
+            "{fail_msg}": "\n".join(fail_msg),
             "{file1}": file1_path,
             "{file2}": file2_path,
+            "{file1_sub_path}": file1_sub_path,
+            "{file2_sub_path}": file2_sub_path,
+            "{build_file_path}": ctx.build_file_path,
+            "{diff_args}": " ".join([
+                shell.quote(arg)
+                for arg in ctx.attr.diff_args
+            ]),
         },
         is_executable = True,
     )
@@ -92,6 +112,7 @@ _diff_test = rule(
             allow_files = True,
             mandatory = True,
         ),
+        "diff_args": attr.string_list(),
         "_windows_constraint": attr.label(default = "@platforms//os:windows"),
         "_diff_test_tmpl_sh": attr.label(
             default = ":diff_test_tmpl.sh",
@@ -106,7 +127,7 @@ _diff_test = rule(
     implementation = _diff_test_impl,
 )
 
-def diff_test(name, file1, file2, size = None, timeout = None, **kwargs):
+def diff_test(name, file1, file2, diff_args = [], size = "small", **kwargs):
     """A test that compares two files.
 
     The test succeeds if the files' contents match.
@@ -114,17 +135,25 @@ def diff_test(name, file1, file2, size = None, timeout = None, **kwargs):
     Args:
       name: The name of the test rule.
       file1: Label of the file to compare to <code>file2</code>.
-      file2: Label of the file to compare to <code>file1</code>.
+      file2: Label of the file to compare to <code>file1</code>, or a list of strings which are the lines to expect <code>file1</code> to contain.
+      diff_args: Arguments to pass to the `diff` command. (Ignored on Windows)
       size: standard attribute for tests
-      timeout: standard attribute for tests. Defaults to "short" if both timeout and size are unspecified.
       **kwargs: The <a href="https://docs.bazel.build/versions/main/be/common-definitions.html#common-attributes-tests">common attributes for tests</a>.
     """
+    if types.is_list(file2):
+        write_file2_target = name + ".file2"
+        write_file(
+            name = write_file2_target,
+            out = write_file2_target + ".txt",
+            content = file2,
+        )
+        file2 = write_file2_target
 
     _diff_test(
         name = name,
         file1 = file1,
         file2 = file2,
         size = size,
-        timeout = default_timeout(size, timeout),
+        diff_args = diff_args,
         **kwargs
     )
